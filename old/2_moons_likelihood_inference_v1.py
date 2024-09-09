@@ -63,6 +63,9 @@ data = generate_data(jrandom.PRNGKey(1), 10000)  # Shape: (n, nodes, dim) here d
 nodes_max = data.shape[1]
 node_ids = jnp.arange(nodes_max)
 
+# Global condition mask
+M_c = jnp.array([1, 0, 0])  # Condition on theta, infer x1 and x2
+
 _ = pairplot(np.array(data[...,0]), labels=["theta", "x1", "x2"], figsize=(5,5))
 plt.show()
 
@@ -178,15 +181,8 @@ def loss_fn(params: dict, key: PRNGKey, batch_size: int = 1024):
     # Node ids (can be subsampled but here we use all nodes)
     ids = node_ids
 
-    # Condition mask -> randomly condition on some data.
-    condition_mask = jax.random.bernoulli(rng_condition, 0.333, shape=(batch_xs.shape[0], batch_xs.shape[1]))
-    condition_mask_all_one = jnp.all(condition_mask, axis=-1, keepdims=True)
-    condition_mask *= condition_mask_all_one  # Avoid conditioning on all nodes -> nothing to train...
+    condition_mask = jnp.tile(M_c, (batch_size, 1))
     condition_mask = condition_mask[..., None]
-    # Alternatively you can also set the condition mask manually to specific conditional distributions.
-    # condition_mask = jnp.zeros((3,), dtype=jnp.bool_)  # Joint mask
-    # condition_mask = jnp.array([False, True, True], dtype=jnp.bool_)  # Posterior mask
-    # condition_mask = jnp.array([True, False, False], dtype=jnp.bool_)  # Likelihod mask
 
     # You can also structure the base mask!
     edge_mask = jnp.ones((4 * batch_size // 5, batch_xs.shape[1], batch_xs.shape[1]),
@@ -229,7 +225,7 @@ replicated_params = jax.tree_map(lambda x: jnp.array([x] * n_devices), params)
 replicated_opt_state = jax.tree_map(lambda x: jnp.array([x] * n_devices), opt_state)
 
 key = jrandom.PRNGKey(0)
-for _ in range(10):
+for _ in range(1):
     l = 0
     for i in range(5000):
         key, subkey = jrandom.split(key)

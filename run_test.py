@@ -6,6 +6,8 @@ from jax import Array
 import os
 
 import matplotlib.pyplot as plt
+
+import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import seaborn as sns
 import pandas as pd
@@ -63,7 +65,17 @@ data = generate_data(jrandom.PRNGKey(1), 10000)  # Shape: (n, nodes, dim) here d
 nodes_max = data.shape[1]
 node_ids = jnp.arange(nodes_max)
 
-_ = pairplot(np.array(data[...,0]), labels=["theta", "x1", "x2"], figsize=(5,5))
+# Plot histograms
+fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+labels = ['theta', 'x1', 'x2']
+
+for i in range(3):
+    axes[i].hist(data[:, i], bins=50, density=True)
+    axes[i].set_title(f'Histogram of {labels[i]}')
+    axes[i].set_xlabel(labels[i])
+    axes[i].set_ylabel('Density')
+
+plt.tight_layout()
 plt.show()
 
 
@@ -186,7 +198,8 @@ def loss_fn(params: dict, key: PRNGKey, batch_size: int = 1024):
     # Alternatively you can also set the condition mask manually to specific conditional distributions.
     # condition_mask = jnp.zeros((3,), dtype=jnp.bool_)  # Joint mask
     # condition_mask = jnp.array([False, True, True], dtype=jnp.bool_)  # Posterior mask
-    # condition_mask = jnp.array([True, False, False], dtype=jnp.bool_)  # Likelihod mask
+    condition_mask = jnp.array([True, False, False], dtype=jnp.bool_)  # Likelihood mask
+    condition_mask = jnp.tile(condition_mask[None, :, None], (batch_size, 1, 1))
 
     # You can also structure the base mask!
     edge_mask = jnp.ones((4 * batch_size // 5, batch_xs.shape[1], batch_xs.shape[1]),
@@ -229,7 +242,7 @@ replicated_params = jax.tree_map(lambda x: jnp.array([x] * n_devices), params)
 replicated_opt_state = jax.tree_map(lambda x: jnp.array([x] * n_devices), opt_state)
 
 key = jrandom.PRNGKey(0)
-for _ in range(10):
+for _ in range(3):
     l = 0
     for i in range(5000):
         key, subkey = jrandom.split(key)
@@ -271,6 +284,9 @@ def diffusion_backward(t, x, node_ids=node_ids, condition_mask=condition_mask, r
 end_std = jnp.squeeze(sde.marginal_stddev(jnp.ones(1)))
 end_mean = jnp.squeeze(sde.marginal_mean(jnp.ones(1)))
 
+
+# Assuming all previous functions and variables are defined
+
 @partial(jax.jit, static_argnums=(1, 3, 7, 8))
 def sample_fn(key, shape, node_ids=node_ids, time_steps=500, condition_mask=jnp.zeros((nodes_max,), dtype=int),
               condition_value=jnp.zeros((nodes_max,)), edge_mask=None, score_fn=model_fn, replace_conditioned=True):
@@ -281,7 +297,7 @@ def sample_fn(key, shape, node_ids=node_ids, time_steps=500, condition_mask=jnp.
 
     if replace_conditioned:
         x_T = x_T * (1 - condition_mask) + condition_value * condition_mask
-    # Sove backward sde
+    # Solve backward sde
     keys = jrandom.split(key2, shape)
     ys = jax.vmap(lambda *args: sdeint(*args, noise_type="diagonal"), in_axes=(0, None, None, 0, None), out_axes=0)(
         keys, lambda t, x: drift_backward(t, x, node_ids, condition_mask, edge_mask=edge_mask, score_fn=score_fn,
@@ -290,9 +306,30 @@ def sample_fn(key, shape, node_ids=node_ids, time_steps=500, condition_mask=jnp.
         jnp.linspace(1., T_min, time_steps))
     return ys
 
-# Full joint estimation
-samples = sample_fn(jrandom.PRNGKey(0), (10000,), node_ids, condition_mask=jnp.zeros((nodes_max,), dtype=int), condition_value=jnp.zeros((nodes_max,)))
+# Generate theta values from the prior
+key1, key2 = jrandom.split(jrandom.PRNGKey(0))
+n = 10000  # Number of samples
+theta1 = jrandom.normal(key1, (n, 1)) * 3  # Prior on theta
 
-with use_style("pyloric"):
-    fig,axes = pairplot(np.array(samples[:,-1,:]), figsize=(5,5), labels=["$\\theta_1$", "$x_1$", "$x_2$"], diag_kind="kde", color="black", linewidth=2)
-    plt.show()
+# Set up conditioning mask and values for likelihood sampling
+condition_mask = jnp.array([1, 0, 0])  # Condition on theta, sample x1 and x2
+condition_value = jnp.pad(theta1, ((0, 0), (0, 2)), mode='constant')  # Pad theta with zeros for x1 and x2
+
+# Sample from the likelihood
+samples = sample_fn(key2, (n,), node_ids, condition_mask=condition_mask, condition_value=condition_value)
+
+# Extract the final samples
+final_samples = samples[:, -1, :]
+
+# Plot histograms
+fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+labels = ['theta', 'x1', 'x2']
+
+for i in range(3):
+    axes[i].hist(final_samples[:, i], bins=50, density=True)
+    axes[i].set_title(f'Histogram of {labels[i]}')
+    axes[i].set_xlabel(labels[i])
+    axes[i].set_ylabel('Density')
+
+plt.tight_layout()
+plt.show()

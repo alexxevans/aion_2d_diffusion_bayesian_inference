@@ -63,6 +63,9 @@ data = generate_data(jrandom.PRNGKey(1), 10000)  # Shape: (n, nodes, dim) here d
 nodes_max = data.shape[1]
 node_ids = jnp.arange(nodes_max)
 
+# Global condition mask
+M_c = jnp.array([1, 0, 0])  # Condition on theta, infer x1 and x2
+
 _ = pairplot(np.array(data[...,0]), labels=["theta", "x1", "x2"], figsize=(5,5))
 plt.show()
 
@@ -178,15 +181,8 @@ def loss_fn(params: dict, key: PRNGKey, batch_size: int = 1024):
     # Node ids (can be subsampled but here we use all nodes)
     ids = node_ids
 
-    # Condition mask -> randomly condition on some data.
-    condition_mask = jax.random.bernoulli(rng_condition, 0.333, shape=(batch_xs.shape[0], batch_xs.shape[1]))
-    condition_mask_all_one = jnp.all(condition_mask, axis=-1, keepdims=True)
-    condition_mask *= condition_mask_all_one  # Avoid conditioning on all nodes -> nothing to train...
+    condition_mask = jnp.tile(M_c, (batch_size, 1))
     condition_mask = condition_mask[..., None]
-    # Alternatively you can also set the condition mask manually to specific conditional distributions.
-    # condition_mask = jnp.zeros((3,), dtype=jnp.bool_)  # Joint mask
-    # condition_mask = jnp.array([False, True, True], dtype=jnp.bool_)  # Posterior mask
-    # condition_mask = jnp.array([True, False, False], dtype=jnp.bool_)  # Likelihod mask
 
     # You can also structure the base mask!
     edge_mask = jnp.ones((4 * batch_size // 5, batch_xs.shape[1], batch_xs.shape[1]),
@@ -290,9 +286,49 @@ def sample_fn(key, shape, node_ids=node_ids, time_steps=500, condition_mask=jnp.
         jnp.linspace(1., T_min, time_steps))
     return ys
 
-# Full joint estimation
-samples = sample_fn(jrandom.PRNGKey(0), (10000,), node_ids, condition_mask=jnp.zeros((nodes_max,), dtype=int), condition_value=jnp.zeros((nodes_max,)))
+def sample_likelihood(key, num_samples=10000, time_steps=500):
+    key1, key2 = jrandom.split(key)
+    thetas = jrandom.normal(key1, (num_samples, 1)) * 3  # Prior on theta
+
+    condition_mask = jnp.array([1, 0, 0])  # Condition on theta, infer x1 and x2
+    condition_values = jnp.pad(thetas, ((0, 0), (0, 2)))  # Pad with zeros for x1, x2
+
+    samples = jax.vmap(lambda cv: sample_fn(
+        key2,
+        (1,),
+        node_ids,
+        time_steps=time_steps,
+        condition_mask=condition_mask,
+        condition_value=cv,
+        replace_conditioned=True
+    ))(condition_values)
+
+    # samples shape: (num_samples, 1, time_steps, nodes_max, 1)
+    # Reshape to (num_samples, time_steps, nodes_max, 1)
+    samples = samples.reshape((num_samples, time_steps, nodes_max, 1))
+
+    # Replace the first node (theta) with the generated thetas
+    samples = samples.at[:, :, 0, 0].set(thetas.repeat(time_steps, axis=1))
+
+    return samples
+
+
+# Generate samples
+key = jrandom.PRNGKey(0)
+likelihood_samples = sample_likelihood(key, num_samples=10000)
+
+# Extract the final state for each sample
+final_samples = likelihood_samples[:, -1, :, 0]  # Shape: (num_samples, nodes_max)
+
+print("Shape of final_samples:", final_samples.shape)
 
 with use_style("pyloric"):
-    fig,axes = pairplot(np.array(samples[:,-1,:]), figsize=(5,5), labels=["$\\theta_1$", "$x_1$", "$x_2$"], diag_kind="kde", color="black", linewidth=2)
+    fig, axes = pairplot(
+        np.array(final_samples),
+        figsize=(5,5),
+        labels=["$\\theta_1$", "$x_1$", "$x_2$"],
+        diag_kind="kde",
+        color="black",
+        linewidth=2
+    )
     plt.show()
