@@ -6,6 +6,8 @@ from jax import Array
 import os
 
 import matplotlib.pyplot as plt
+
+import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import seaborn as sns
 import pandas as pd
@@ -35,7 +37,6 @@ _ = os.system("nvidia-smi  --query-gpu=name --format=csv,noheader") # Should sho
 
 key = jax.random.PRNGKey(42)
 
-
 def generate_data(key: PRNGKey, n: int):
     key1, key2, key3 = jrandom.split(key, 3)
     theta1 = jrandom.normal(key1, (n, 1)) * 3  # Some prior on a parameter
@@ -43,6 +44,16 @@ def generate_data(key: PRNGKey, n: int):
     x2 = 0.1 * theta1 ** 2 + 0.5 * jnp.abs(x1) * jrandom.normal(key3, (n, 1))  # Some data generated from the parameter
     return jnp.concatenate([theta1, x1, x2], axis=1).reshape(n, -1, 1)
 
+def split_data(data, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15):
+    n = data.shape[0]
+    train_size = int(n * train_ratio)
+    val_size = int(n * val_ratio)
+
+    train_data = data[:train_size]
+    val_data = data[train_size:train_size + val_size]
+    test_data = data[train_size + val_size:]
+
+    return train_data, val_data, test_data
 
 def log_potential(theta1: Array, x1: Array, x2: Array, sigma_x1: float = 0.5, sigma_x2: float = 0.5,
                   mean_loc: float = 0.0, mean_scale: float = 3.0):
@@ -58,15 +69,23 @@ def log_potential(theta1: Array, x1: Array, x2: Array, sigma_x1: float = 0.5, si
 
     return log_prob_theta + log_prob_x1 + log_prob_x2
 
-
 data = generate_data(jrandom.PRNGKey(1), 10000)  # Shape: (n, nodes, dim) here dim = 1
 nodes_max = data.shape[1]
 node_ids = jnp.arange(nodes_max)
 
-# Global condition mask
-M_c = jnp.array([1, 0, 0])  # Condition on theta, infer x1 and x2
+train_data, val_data, test_data = split_data(data)
 
-_ = pairplot(np.array(data[...,0]), labels=["theta", "x1", "x2"], figsize=(5,5))
+# Plot histograms
+fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+labels = ['theta', 'x1', 'x2']
+
+for i in range(3):
+    axes[i].hist(test_data[:, i], bins=50, density=True)
+    axes[i].set_title(f'Histogram of {labels[i]} GT')
+    axes[i].set_xlabel(labels[i])
+    axes[i].set_ylabel('Density')
+
+plt.tight_layout()
 plt.show()
 
 
@@ -78,7 +97,7 @@ T_min = 1e-2
 sigma_min = 1e-3
 sigma_max = 15.
 
-p0 = Independent(Empirical(data), 1) # Empirical distribution of the data
+p0 = Independent(Empirical(train_data), 1)
 sde = VESDE(p0, sigma_min=sigma_min , sigma_max=sigma_max)
 
 # Scaling fn for the output of the score model
@@ -181,8 +200,16 @@ def loss_fn(params: dict, key: PRNGKey, batch_size: int = 1024):
     # Node ids (can be subsampled but here we use all nodes)
     ids = node_ids
 
-    condition_mask = jnp.tile(M_c, (batch_size, 1))
+    # Condition mask -> randomly condition on some data.
+    condition_mask = jax.random.bernoulli(rng_condition, 0.333, shape=(batch_xs.shape[0], batch_xs.shape[1]))
+    condition_mask_all_one = jnp.all(condition_mask, axis=-1, keepdims=True)
+    condition_mask *= condition_mask_all_one  # Avoid conditioning on all nodes -> nothing to train...
     condition_mask = condition_mask[..., None]
+    # Alternatively you can also set the condition mask manually to specific conditional distributions.
+    # condition_mask = jnp.zeros((3,), dtype=jnp.bool_)  # Joint mask
+    # condition_mask = jnp.array([False, True, True], dtype=jnp.bool_)  # Posterior mask
+    condition_mask = jnp.array([True, False, False], dtype=jnp.bool_)  # Likelihood mask
+    condition_mask = jnp.tile(condition_mask[None, :, None], (batch_size, 1, 1))
 
     # You can also structure the base mask!
     edge_mask = jnp.ones((4 * batch_size // 5, batch_xs.shape[1], batch_xs.shape[1]),
@@ -202,6 +229,16 @@ def loss_fn(params: dict, key: PRNGKey, batch_size: int = 1024):
                                          node_ids=ids, condition_mask=condition_mask, edge_mask=edge_masks)
 
     return loss
+
+def calculate_validation_loss(params, val_data, batch_size=1024):
+    num_batches = len(val_data) // batch_size
+    total_loss = 0
+    for i in range(num_batches):
+        batch = val_data[i*batch_size:(i+1)*batch_size]
+        key = jrandom.PRNGKey(i)  # Use a different key for each batch
+        loss = loss_fn(params, key, batch_size)
+        total_loss += loss
+    return total_loss / num_batches
 
 
 ### TRAINING ###
@@ -225,13 +262,24 @@ replicated_params = jax.tree_map(lambda x: jnp.array([x] * n_devices), params)
 replicated_opt_state = jax.tree_map(lambda x: jnp.array([x] * n_devices), opt_state)
 
 key = jrandom.PRNGKey(0)
-for _ in range(10):
-    l = 0
-    for i in range(5000):
+num_epochs = 2
+steps_per_epoch = 5000
+
+for epoch in range(num_epochs):
+    train_loss = 0
+    for i in range(steps_per_epoch):
         key, subkey = jrandom.split(key)
-        loss, replicated_params, replicated_opt_state = update(replicated_params, jax.random.split(subkey, (n_devices,)), replicated_opt_state)
-        l += loss[0] /5000
-    print(l)
+        loss, replicated_params, replicated_opt_state = update(replicated_params,
+                                                               jax.random.split(subkey, (n_devices,)),
+                                                               replicated_opt_state)
+        train_loss += loss[0] / steps_per_epoch
+
+    # Calculate validation loss
+    params = jax.tree_map(lambda x: x[0], replicated_params)
+    val_loss = calculate_validation_loss(params, val_data)
+
+    print(f"Epoch {epoch + 1}/{num_epochs}, Train Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}")
+
 params = jax.tree_map(lambda x: x[0], replicated_params)
 
 
@@ -277,7 +325,7 @@ def sample_fn(key, shape, node_ids=node_ids, time_steps=500, condition_mask=jnp.
 
     if replace_conditioned:
         x_T = x_T * (1 - condition_mask) + condition_value * condition_mask
-    # Sove backward sde
+    # Solve backward sde
     keys = jrandom.split(key2, shape)
     ys = jax.vmap(lambda *args: sdeint(*args, noise_type="diagonal"), in_axes=(0, None, None, 0, None), out_axes=0)(
         keys, lambda t, x: drift_backward(t, x, node_ids, condition_mask, edge_mask=edge_mask, score_fn=score_fn,
@@ -286,49 +334,30 @@ def sample_fn(key, shape, node_ids=node_ids, time_steps=500, condition_mask=jnp.
         jnp.linspace(1., T_min, time_steps))
     return ys
 
-def sample_likelihood(key, num_samples=10000, time_steps=500):
-    key1, key2 = jrandom.split(key)
-    thetas = jrandom.normal(key1, (num_samples, 1)) * 3  # Prior on theta
+# Assuming test_data is already split
+test_thetas = test_data[:, 0, :]  # This should have shape (n_test, 1)
+print("Shape of test_thetas:", test_thetas.shape)
 
-    condition_mask = jnp.array([1, 0, 0])  # Condition on theta, infer x1 and x2
-    condition_values = jnp.pad(thetas, ((0, 0), (0, 2)))  # Pad with zeros for x1, x2
+# Set up conditioning mask and values for likelihood sampling
+condition_mask = jnp.array([1, 0, 0])  # Condition on theta, sample x1 and x2
+condition_value = jnp.pad(test_thetas, ((0, 0), (0, 2)), mode='constant')  # Pad theta with zeros for x1 and x2
+print("Shape of condition_value:", condition_value.shape)
 
-    samples = jax.vmap(lambda cv: sample_fn(
-        key2,
-        (1,),
-        node_ids,
-        time_steps=time_steps,
-        condition_mask=condition_mask,
-        condition_value=cv,
-        replace_conditioned=True
-    ))(condition_values)
+# Sample from the likelihood using the test thetas
+key_test = jrandom.PRNGKey(42)  # New key for test sampling
+samples = sample_fn(key_test, (test_thetas.shape[0],), node_ids, condition_mask=condition_mask, condition_value=condition_value)
 
-    # samples shape: (num_samples, 1, time_steps, nodes_max, 1)
-    # Reshape to (num_samples, time_steps, nodes_max, 1)
-    samples = samples.reshape((num_samples, time_steps, nodes_max, 1))
+# Extract the final samples
+final_samples = samples[:, -1, :]
 
-    # Replace the first node (theta) with the generated thetas
-    samples = samples.at[:, :, 0, 0].set(thetas.repeat(time_steps, axis=1))
+fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+labels = ['theta', 'x1', 'x2']
 
-    return samples
+for i in range(3):
+    axes[i].hist(final_samples[:, i], bins=50, density=True)
+    axes[i].set_title(f'Histogram of {labels[i]} Predictions')
+    axes[i].set_xlabel(labels[i])
+    axes[i].set_ylabel('Density')
 
-
-# Generate samples
-key = jrandom.PRNGKey(0)
-likelihood_samples = sample_likelihood(key, num_samples=10000)
-
-# Extract the final state for each sample
-final_samples = likelihood_samples[:, -1, :, 0]  # Shape: (num_samples, nodes_max)
-
-print("Shape of final_samples:", final_samples.shape)
-
-with use_style("pyloric"):
-    fig, axes = pairplot(
-        np.array(final_samples),
-        figsize=(5,5),
-        labels=["$\\theta_1$", "$x_1$", "$x_2$"],
-        diag_kind="kde",
-        color="black",
-        linewidth=2
-    )
-    plt.show()
+plt.tight_layout()
+plt.show()
