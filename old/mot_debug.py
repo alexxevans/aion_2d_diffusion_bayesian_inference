@@ -37,6 +37,29 @@ _ = os.system("nvidia-smi  --query-gpu=name --format=csv,noheader") # Should sho
 
 key = jax.random.PRNGKey(42)
 
+def generate_data(key: PRNGKey, n: int):
+    keys = jrandom.split(key, 11)  # We need 11 keys now: 9 for thetas, 2 for noise
+    thetas = jrandom.normal(keys[0], (n, 9)) * 3  # Prior on 9 parameters
+
+    x1 = 2 * jnp.sin(jnp.sum(thetas, axis=1, keepdims=True)) + jrandom.normal(keys[9], (n, 1)) * 0.5
+    x2 = 0.1 * jnp.sum(thetas**2, axis=1, keepdims=True) + 0.5 * jnp.abs(x1) * jrandom.normal(keys[10], (n, 1))
+    x3 = jnp.cos(thetas[:, 0:1]) + jrandom.normal(keys[1], (n, 1)) * 0.3
+    x4 = jnp.exp(thetas[:, 1:2] / 2) + jrandom.normal(keys[2], (n, 1)) * 0.2
+    x5 = thetas[:, 2:3] ** 2 + jrandom.normal(keys[3], (n, 1)) * 0.4
+
+    return jnp.concatenate([thetas, x1, x2, x3, x4, x5], axis=1).reshape(n, -1, 1)
+
+def split_data(data, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15):
+    n = data.shape[0]
+    train_size = int(n * train_ratio)
+    val_size = int(n * val_ratio)
+
+    train_data = data[:train_size]
+    val_data = data[train_size:train_size + val_size]
+    test_data = data[train_size + val_size:]
+
+    return train_data, val_data, test_data
+
 def import_data(key: PRNGKey, n: int, theta_file: str, x_file: str):
     # Read the conditioning parameters (theta) from the CSV file
     theta = pd.read_csv(theta_file).values  # Assuming shape (n, 9)
@@ -60,33 +83,59 @@ def import_data(key: PRNGKey, n: int, theta_file: str, x_file: str):
 
     return concatenated.reshape(n, -1, 1)  # Now (n, 14, 1)
 
-def split_data(data, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15):
-    n = data.shape[0]
-    train_size = int(n * train_ratio)
-    val_size = int(n * val_ratio)
+debug_folder = "debug"
+os.makedirs(debug_folder, exist_ok=True)
+theta_file = "../data/input/conditioning_data.csv"
+x_file = "../data/input/data_to_learn.csv"
 
-    train_data = data[:train_size]
-    val_data = data[train_size:train_size + val_size]
-    test_data = data[train_size + val_size:]
+#data = import_data(jrandom.PRNGKey(1), 850000, theta_file, x_file)
+#print(f"Imported data shape: {data.shape}")
+#data = data.astype(jnp.float32)  # Convert data to float32
+#nodes_max = data.shape[1]
+#node_ids = jnp.arange(nodes_max)
 
-    return train_data, val_data, test_data
+#train_data, val_data, test_data = split_data(data)
 
-theta_file = "data/input/conditioning_data.csv"
-x_file = "data/input/data_to_learn.csv"
-
-data = import_data(jrandom.PRNGKey(1), 850000, theta_file, x_file)
-data = data.astype(jnp.float32)  # Convert data to float32
+data = generate_data(jrandom.PRNGKey(1), 1000000)  # Shape: (n, nodes, dim) here dim = 1
+print(f"Gen data shape: {data.shape}")
 nodes_max = data.shape[1]
 node_ids = jnp.arange(nodes_max)
 
 train_data, val_data, test_data = split_data(data)
 
-train_thetas, train_x = train_data[:, :9], train_data[:, 9:]
-val_thetas, val_x = val_data[:, :9], val_data[:, 9:]
-test_thetas, test_x = test_data[:, :9], test_data[:, 9:]
+# Save imported data to CSV
+imported_data_df = pd.DataFrame(data.reshape(data.shape[0], -1))
+imported_data_df.columns = [f'var_{i}' for i in range(imported_data_df.shape[1])]
+imported_data_df.to_csv(os.path.join(debug_folder, "imported_data.csv"), index=False)
+print(f"Saved imported data to {os.path.join(debug_folder, 'imported_data.csv')}")
+
+# Save train, validation, and test data
+train_data_df = pd.DataFrame(train_data.reshape(train_data.shape[0], -1))
+train_data_df.columns = [f'var_{i}' for i in range(train_data_df.shape[1])]
+train_data_df.to_csv(os.path.join(debug_folder, "train_data.csv"), index=False)
+print(f"Saved train data to {os.path.join(debug_folder, 'train_data.csv')}")
+
+val_data_df = pd.DataFrame(val_data.reshape(val_data.shape[0], -1))
+val_data_df.columns = [f'var_{i}' for i in range(val_data_df.shape[1])]
+val_data_df.to_csv(os.path.join(debug_folder, "val_data.csv"), index=False)
+print(f"Saved validation data to {os.path.join(debug_folder, 'val_data.csv')}")
+
+test_data_df = pd.DataFrame(test_data.reshape(test_data.shape[0], -1))
+test_data_df.columns = [f'var_{i}' for i in range(test_data_df.shape[1])]
+test_data_df.to_csv(os.path.join(debug_folder, "test_data.csv"), index=False)
+print(f"Saved test data to {os.path.join(debug_folder, 'test_data.csv')}")
 
 fig, axes = plt.subplots(2, 7, figsize=(28, 8))
 labels = ['theta1', 'theta2', 'theta3', 'theta4', 'theta5', 'theta6', 'theta7', 'theta8', 'theta9', 'x1', 'x2', 'x3', 'x4', 'x5']
+
+print("=== Data Integrity Check ===")
+print("Imported data stats:")
+print(f"Mean: {jnp.mean(data):.4f}")
+print(f"Std: {jnp.std(data):.4f}")
+print(f"Min: {jnp.min(data):.4f}")
+print(f"Max: {jnp.max(data):.4f}")
+print("Any NaNs:", jnp.isnan(data).any())
+print("Any Infs:", jnp.isinf(data).any())
 
 for i in range(14):
     row = i // 7
@@ -98,6 +147,7 @@ for i in range(14):
 
 plt.tight_layout()
 plt.show()
+
 
 ### SETTING UP THE DIFFUSION PROCESS ###
 
@@ -165,7 +215,7 @@ def model(t: Array, x: Array, node_ids: Array, condition_mask: Array, edge_mask:
     x_encoded = jnp.concatenate([value_embeddings, id_embeddings, condition_embedding], axis=-1)
 
     # Transformer part --------------------------------------------------------------------------------
-    model = Transformer(num_heads=2, num_layers=2, attn_size=10, widening_factor=3)
+    model = Transformer(num_heads=4, num_layers=4, attn_size=32, widening_factor=4)
 
     # Encode - here we just use a transformer to transform the tokenized inputs into a latent representation
     h = model(x_encoded, context=time_embeddings, mask=edge_mask)
@@ -191,7 +241,6 @@ print("Total number of parameters: ", jax.tree_util.tree_reduce(lambda x,y: x+y,
 jax.tree_util.tree_map(lambda x: x.shape, params) # Here we can see the shapes of the parameters
 
 
-
 ### LOSS ###
 
 def weight_fn(t: Array):
@@ -208,17 +257,12 @@ def marginalize(rng: PRNGKey, edge_mask: Array):
     return edge_mask
 
 
-def loss_fn(params: dict, key: PRNGKey, batch_size: int = 1024):
+def loss_fn(params: dict, key: PRNGKey, batch_size: int = 2048):
     rng_time, rng_sample, rng_data, rng_condition, rng_edge_mask1, rng_edge_mask2 = jax.random.split(key, 6)
 
-    # Sample from training data
-    idx = jax.random.choice(rng_sample, jnp.arange(train_thetas.shape[0]), (batch_size,))
-    batch_thetas = train_thetas[idx]
-    batch_x = train_x[idx]
-    batch_xs = jnp.concatenate([batch_thetas, batch_x], axis=1).reshape(batch_size, -1, 1)
-
-    # Generate random times
+    # Generate data and random times
     times = jax.random.uniform(rng_time, (batch_size, 1, 1), minval=T_min, maxval=1.0)
+    batch_xs = generate_data(rng_data, batch_size)  # n, T_max, 1
 
     # Node ids (can be subsampled but here we use all nodes)
     ids = node_ids
@@ -256,15 +300,13 @@ def loss_fn(params: dict, key: PRNGKey, batch_size: int = 1024):
 
     return loss
 
-def calculate_validation_loss(params, batch_size=1024):
+def calculate_validation_loss(params, val_data, batch_size=2048):
     num_batches = len(val_data) // batch_size
     total_loss = 0
     for i in range(num_batches):
-        start_idx = i * batch_size
-        end_idx = min((i + 1) * batch_size, len(val_data))
-        batch = val_data[start_idx:end_idx]
+        batch = val_data[i*batch_size:(i+1)*batch_size]
         key = jrandom.PRNGKey(i)  # Use a different key for each batch
-        loss = loss_fn(params, key, batch.shape[0])
+        loss = loss_fn(params, key, batch_size)
         total_loss += loss
     return total_loss / num_batches
 
@@ -289,26 +331,8 @@ n_devices = jax.local_device_count()
 replicated_params = jax.tree_map(lambda x: jnp.array([x] * n_devices), params)
 replicated_opt_state = jax.tree_map(lambda x: jnp.array([x] * n_devices), opt_state)
 
-key = jrandom.PRNGKey(0)
-num_epochs = 2
-steps_per_epoch = 5000
 
-for epoch in range(num_epochs):
-    train_loss = 0
-    for i in range(steps_per_epoch):
-        key, subkey = jrandom.split(key)
-        loss, replicated_params, replicated_opt_state = update(replicated_params,
-                                                               jax.random.split(subkey, (n_devices,)),
-                                                               replicated_opt_state)
-        train_loss += loss[0] / steps_per_epoch
 
-    # Calculate validation loss
-    params = jax.tree_map(lambda x: x[0], replicated_params)
-    val_loss = calculate_validation_loss(params)
-
-    print(f"Epoch {epoch + 1}/{num_epochs}, Train Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}")
-
-params = jax.tree_map(lambda x: x[0], replicated_params)
 
 
 ### SAMPLING ###
@@ -331,6 +355,14 @@ def drift_backward(t, x, node_ids=node_ids, condition_mask=condition_mask, edge_
         f = f * (1 - condition_mask[:len(node_ids)])
 
     return f
+
+def check_numerical_stability(x, name):
+    if jnp.isnan(x).any() or jnp.isinf(x).any():
+        print(f"Warning: {name} contains NaN or Inf values")
+        print(f"NaN count: {jnp.isnan(x).sum()}")
+        print(f"Inf count: {jnp.isinf(x).sum()}")
+    else:
+        print(f"{name} is numerically stable")
 
 # Reverse SDE diffusion
 def diffusion_backward(t, x, node_ids=node_ids, condition_mask=condition_mask, replace_conditioned=True):
@@ -362,6 +394,7 @@ def sample_fn(key, shape, node_ids=node_ids, time_steps=500, condition_mask=jnp.
         jnp.linspace(1., T_min, time_steps))
     return ys
 
+
 def batch_sample(key, thetas, batch_size=2048):
     num_samples = thetas.shape[0]
     num_batches = (num_samples + batch_size - 1) // batch_size  # Ceiling division
@@ -384,19 +417,117 @@ def batch_sample(key, thetas, batch_size=2048):
 
     return jnp.concatenate(samples_list, axis=0)
 
+def visualize_distributions(epoch, step, params, test_data):
+    # Sample from the current model
+    test_thetas = test_data[:1000, :9, 0]  # Use a subset for faster visualization
+    condition_value = jnp.pad(test_thetas, ((0, 0), (0, 5)), mode='constant')
+    samples = batch_sample(jrandom.PRNGKey(epoch * 10000 + step), test_thetas)
+
+    # Create the plot
+    fig, axes = plt.subplots(3, 5, figsize=(20, 12))
+    fig.suptitle(f'Distribution Comparison - Epoch {epoch}, Step {step}')
+
+    for i in range(14):
+        row = i // 5
+        col = i % 5
+
+        # Plot original data distribution
+        axes[row, col].hist(test_data[:1000, i, 0], bins=50, alpha=0.5, label='Original', density=True)
+
+        # Plot sampled data distribution
+        axes[row, col].hist(samples[:, i], bins=50, alpha=0.5, label='Sampled', density=True)
+
+        axes[row, col].set_title(f'Variable {i + 1}')
+        axes[row, col].legend()
+
+    plt.tight_layout()
+    plt.savefig(f'debug/distribution_epoch{epoch}_step{step}.png')
+    plt.close()
+
+key = jrandom.PRNGKey(0)
+# Modify your training loop
+num_epochs = 2
+steps_per_epoch = 5000
+visualization_frequency = 1000  # Visualize every 1000 steps
+
+for epoch in range(num_epochs):
+    train_loss = 0
+    for i in range(steps_per_epoch):
+        key, subkey = jrandom.split(key)
+        loss, replicated_params, replicated_opt_state = update(replicated_params,
+                                                               jax.random.split(subkey, (n_devices,)),
+                                                               replicated_opt_state)
+        train_loss += loss[0] / steps_per_epoch
+
+        if i % visualization_frequency == 0:
+            params = jax.tree_map(lambda x: x[0], replicated_params)
+            visualize_distributions(epoch, i, params, test_data)
+
+    # Calculate validation loss
+    params = jax.tree_map(lambda x: x[0], replicated_params)
+    val_loss = calculate_validation_loss(params, val_data)
+
+    print(f"Epoch {epoch + 1}/{num_epochs}, Train Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}")
+
+    # Visualize at the end of each epoch
+    visualize_distributions(epoch, steps_per_epoch, params, test_data)
+
+params = jax.tree_map(lambda x: x[0], replicated_params)
+
 # Assuming test_data is already split
 test_thetas = test_data[:, :9, 0]  # This will have shape (n_test, 9)
-# Use test_thetas directly
 print("Shape of test_thetas:", test_thetas.shape)
+
+import os
+import pandas as pd
+
+
+def track_sample_evolution(key, shape, node_ids, time_steps=500, condition_mask=condition_mask,
+                           condition_value=condition_value):
+    x_T = jax.random.normal(key, shape + (len(node_ids),)) * end_std[node_ids] + end_mean[node_ids]
+    if jnp.any(condition_mask):
+        x_T = x_T * (1 - condition_mask) + condition_value * condition_mask
+
+    evolution = [x_T]
+    for t in jnp.linspace(1., T_min, time_steps):
+        x_t = evolution[-1]
+        score = model_fn(params, jnp.array([[t]]), x_t.reshape(-1, len(node_ids), 1), node_ids, condition_mask)
+        drift = sde.drift(t, x_t) - sde.diffusion(t, x_t) ** 2 * score.reshape(x_t.shape)
+        diffusion = sde.diffusion(t, x_t)
+
+        x_next = x_t + drift * (1 / time_steps) + diffusion * jnp.sqrt(1 / time_steps) * jax.random.normal(key,
+                                                                                                           x_t.shape)
+        evolution.append(x_next)
+
+    return jnp.stack(evolution)
+
+
+sample_evolution = track_sample_evolution(jrandom.PRNGKey(0), (1,), node_ids)
+
+# Create a debug folder if it doesn't exist
+debug_folder = "debug"
+os.makedirs(debug_folder, exist_ok=True)
 
 # Set up conditioning mask and values for likelihood sampling
 condition_mask = jnp.array([1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0])  # Condition on 9 thetas, sample 5 xs
 condition_value = jnp.pad(test_thetas, ((0, 0), (0, 5)), mode='constant')  # Pad 9 thetas with zeros for 5 xs
 print("Shape of condition_value:", condition_value.shape)
 
+# Save condition_value to CSV
+condition_value_df = pd.DataFrame(condition_value, columns=[f'value_{i}' for i in range(condition_value.shape[1])])
+condition_value_df.to_csv(os.path.join(debug_folder, "condition_value.csv"), index=False)
+print(f"Saved condition_value to {os.path.join(debug_folder, 'condition_value.csv')}")
+
 # Sample from the likelihood using the test thetas
 key_test = jrandom.PRNGKey(42)  # New key for test sampling
 final_samples = batch_sample(key_test, test_thetas)
+
+# Save final_samples to CSV
+final_samples_df = pd.DataFrame(final_samples, columns=[f'sample_{i}' for i in range(final_samples.shape[1])])
+final_samples_df.to_csv(os.path.join(debug_folder, "final_samples.csv"), index=False)
+print(f"Saved final_samples to {os.path.join(debug_folder, 'final_samples.csv')}")
+
+print("Shape of final_samples:", final_samples.shape)
 
 fig, axes = plt.subplots(2, 7, figsize=(28, 8))
 labels = ['theta1', 'theta2', 'theta3', 'theta4', 'theta5', 'theta6', 'theta7', 'theta8', 'theta9', 'x1', 'x2', 'x3', 'x4', 'x5']

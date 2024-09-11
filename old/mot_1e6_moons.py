@@ -81,13 +81,21 @@ def import_data(key: PRNGKey, n: int, theta_file: str, x_file: str):
     # Check shape after concatenation
     print(f"Shape after concatenation: {concatenated.shape}")
 
-    return concatenated.reshape(n, -1, 1)  # Now (n, 14, 1)
+    #return concatenated.reshape(n, -1, 1)  # Now (n, 14, 1)
 
-theta_file = "data/input/conditioning_data.csv"
-x_file = "data/input/data_to_learn.csv"
+theta_file = "../data/input/random/conditioning_data.csv"
+x_file = "../data/input/random/data_to_learn.csv"
 
-data = import_data(jrandom.PRNGKey(1), 849488, theta_file, x_file)
-data = data.astype(jnp.float32)  # Convert data to float32
+#data = import_data(jrandom.PRNGKey(1), 849488, theta_file, x_file)
+#print(f"Imported data shape: {data.shape}")
+#data = data.astype(jnp.float32)  # Convert data to float32
+#nodes_max = data.shape[1]
+#node_ids = jnp.arange(nodes_max)
+
+#train_data, val_data, test_data = split_data(data)
+
+data = generate_data(jrandom.PRNGKey(1), 1000000)  # Shape: (n, nodes, dim) here dim = 1
+print(f"Gen data shape: {data.shape}")
 nodes_max = data.shape[1]
 node_ids = jnp.arange(nodes_max)
 
@@ -95,7 +103,6 @@ train_data, val_data, test_data = split_data(data)
 
 fig, axes = plt.subplots(2, 7, figsize=(28, 8))
 labels = ['theta1', 'theta2', 'theta3', 'theta4', 'theta5', 'theta6', 'theta7', 'theta8', 'theta9', 'x1', 'x2', 'x3', 'x4', 'x5']
-
 
 for i in range(14):
     row = i // 7
@@ -107,6 +114,7 @@ for i in range(14):
 
 plt.tight_layout()
 plt.show()
+
 
 ### SETTING UP THE DIFFUSION PROCESS ###
 
@@ -174,7 +182,7 @@ def model(t: Array, x: Array, node_ids: Array, condition_mask: Array, edge_mask:
     x_encoded = jnp.concatenate([value_embeddings, id_embeddings, condition_embedding], axis=-1)
 
     # Transformer part --------------------------------------------------------------------------------
-    model = Transformer(num_heads=2, num_layers=2, attn_size=10, widening_factor=3)
+    model = Transformer(num_heads=4, num_layers=4, attn_size=32, widening_factor=4)
 
     # Encode - here we just use a transformer to transform the tokenized inputs into a latent representation
     h = model(x_encoded, context=time_embeddings, mask=edge_mask)
@@ -185,7 +193,7 @@ def model(t: Array, x: Array, node_ids: Array, condition_mask: Array, edge_mask:
     return out
 
 # Choose a small batch size for initialization
-init_batch_size = 128
+init_batch_size = 8192
 
 # Create a small batch of data for initialization
 init_data = jax.tree_map(lambda x: x[:init_batch_size], data)
@@ -216,7 +224,7 @@ def marginalize(rng: PRNGKey, edge_mask: Array):
     return edge_mask
 
 
-def loss_fn(params: dict, key: PRNGKey, batch_size: int = 1024):
+def loss_fn(params: dict, key: PRNGKey, batch_size: int = 2048):
     rng_time, rng_sample, rng_data, rng_condition, rng_edge_mask1, rng_edge_mask2 = jax.random.split(key, 6)
 
     # Generate data and random times
@@ -259,7 +267,7 @@ def loss_fn(params: dict, key: PRNGKey, batch_size: int = 1024):
 
     return loss
 
-def calculate_validation_loss(params, val_data, batch_size=1024):
+def calculate_validation_loss(params, val_data, batch_size=2048):
     num_batches = len(val_data) // batch_size
     total_loss = 0
     for i in range(num_batches):
@@ -363,14 +371,31 @@ def sample_fn(key, shape, node_ids=node_ids, time_steps=500, condition_mask=jnp.
         jnp.linspace(1., T_min, time_steps))
     return ys
 
-# Choose a smaller number of test samples, e.g., 1000
-n_test_samples = 10000
 
-# Randomly select n_test_samples from the test data
-key_subset = jax.random.PRNGKey(123)  # Use a fixed seed for reproducibility
-indices = jax.random.permutation(key_subset, test_data.shape[0])[:n_test_samples]
-test_thetas = test_data[indices, :9, 0]  # This will have shape (n_test_samples, 9)
+def batch_sample(key, thetas, batch_size=2048):
+    num_samples = thetas.shape[0]
+    num_batches = (num_samples + batch_size - 1) // batch_size  # Ceiling division
 
+    samples_list = []
+
+    for i in range(num_batches):
+        start_idx = i * batch_size
+        end_idx = min((i + 1) * batch_size, num_samples)
+
+        batch_thetas = thetas[start_idx:end_idx]
+        batch_condition_value = jnp.pad(batch_thetas, ((0, 0), (0, 5)), mode='constant')
+
+        key, subkey = jax.random.split(key)
+        batch_samples = sample_fn(subkey, (batch_thetas.shape[0],), node_ids,
+                                  condition_mask=condition_mask,
+                                  condition_value=batch_condition_value)
+
+        samples_list.append(batch_samples[:, -1, :])  # Keep only the final timestep
+
+    return jnp.concatenate(samples_list, axis=0)
+
+# Assuming test_data is already split
+test_thetas = test_data[:, :9, 0]  # This will have shape (n_test, 9)
 print("Shape of test_thetas:", test_thetas.shape)
 
 # Set up conditioning mask and values for likelihood sampling
@@ -380,12 +405,9 @@ print("Shape of condition_value:", condition_value.shape)
 
 # Sample from the likelihood using the test thetas
 key_test = jrandom.PRNGKey(42)  # New key for test sampling
-samples = sample_fn(key_test, (test_thetas.shape[0],), node_ids,
-                    condition_mask=condition_mask,
-                    condition_value=condition_value)
+final_samples = batch_sample(key_test, test_thetas)
 
-# Extract the final samples
-final_samples = samples[:, -1, :]
+print("Shape of final_samples:", final_samples.shape)
 
 fig, axes = plt.subplots(2, 7, figsize=(28, 8))
 labels = ['theta1', 'theta2', 'theta3', 'theta4', 'theta5', 'theta6', 'theta7', 'theta8', 'theta9', 'x1', 'x2', 'x3', 'x4', 'x5']

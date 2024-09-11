@@ -83,8 +83,8 @@ def import_data(key: PRNGKey, n: int, theta_file: str, x_file: str):
 
     return concatenated.reshape(n, -1, 1)  # Now (n, 14, 1)
 
-theta_file = "data/input/conditioning_data.csv"
-x_file = "data/input/data_to_learn.csv"
+theta_file = "../data/input/random/conditioning_data.csv"
+x_file = "../data/input/random/data_to_learn.csv"
 
 data = import_data(jrandom.PRNGKey(1), 849488, theta_file, x_file)
 data = data.astype(jnp.float32)  # Convert data to float32
@@ -235,10 +235,10 @@ def loss_fn(params: dict, key: PRNGKey, batch_size: int = 1024):
     # condition_mask = jnp.zeros((3,), dtype=jnp.bool_)  # Joint mask
     # condition_mask = jnp.array([False, True, True], dtype=jnp.bool_)  # Posterior mask
 
-    #condition_mask = jnp.array(
-    #    [True, True, True, True, True, True, True, True, True, False, False, False, False, False],
-    #    dtype=jnp.bool_)  # Likelihood mask
-    #condition_mask = jnp.tile(condition_mask[None, :, None], (batch_size, 1, 1))
+    condition_mask = jnp.array(
+        [True, True, True, True, True, True, True, True, True, False, False, False, False, False],
+        dtype=jnp.bool_)  # Likelihood mask
+    condition_mask = jnp.tile(condition_mask[None, :, None], (batch_size, 1, 1))
 
     # You can also structure the base mask!
     edge_mask = jnp.ones((4 * batch_size // 5, batch_xs.shape[1], batch_xs.shape[1]),
@@ -291,7 +291,7 @@ replicated_params = jax.tree_map(lambda x: jnp.array([x] * n_devices), params)
 replicated_opt_state = jax.tree_map(lambda x: jnp.array([x] * n_devices), opt_state)
 
 key = jrandom.PRNGKey(0)
-num_epochs = 5
+num_epochs = 20
 steps_per_epoch = 5000
 
 for epoch in range(num_epochs):

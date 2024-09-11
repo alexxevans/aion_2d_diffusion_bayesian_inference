@@ -37,28 +37,17 @@ _ = os.system("nvidia-smi  --query-gpu=name --format=csv,noheader") # Should sho
 
 key = jax.random.PRNGKey(42)
 
-def import_data(key: PRNGKey, n: int, theta_file: str, x_file: str):
-    # Read the conditioning parameters (theta) from the CSV file
-    theta = pd.read_csv(theta_file).values  # Assuming shape (n, 9)
+def generate_data(key: PRNGKey, n: int):
+    keys = jrandom.split(key, 11)  # We need 11 keys now: 9 for thetas, 2 for noise
+    thetas = jrandom.normal(keys[0], (n, 9)) * 3  # Prior on 9 parameters
 
-    # Read the target variables (x) from the CSV file
-    x = pd.read_csv(x_file).values  # Assuming shape (n, 5)
+    x1 = 2 * jnp.sin(jnp.sum(thetas, axis=1, keepdims=True)) + jrandom.normal(keys[9], (n, 1)) * 0.5
+    x2 = 0.1 * jnp.sum(thetas**2, axis=1, keepdims=True) + 0.5 * jnp.abs(x1) * jrandom.normal(keys[10], (n, 1))
+    x3 = jnp.cos(thetas[:, 0:1]) + jrandom.normal(keys[1], (n, 1)) * 0.3
+    x4 = jnp.exp(thetas[:, 1:2] / 2) + jrandom.normal(keys[2], (n, 1)) * 0.2
+    x5 = thetas[:, 2:3] ** 2 + jrandom.normal(keys[3], (n, 1)) * 0.4
 
-    # Check the shapes before concatenation
-    print(f"Shape of theta: {theta.shape}")
-    print(f"Shape of x: {x.shape}")
-
-    # Ensure the number of samples matches n
-    if theta.shape[0] != x.shape[0]:
-        raise ValueError("Mismatch in number of samples between theta and x")
-
-    # Concatenate theta and x to form the same format as in the original function
-    concatenated = jnp.concatenate([theta, x], axis=1)
-
-    # Check shape after concatenation
-    print(f"Shape after concatenation: {concatenated.shape}")
-
-    return concatenated.reshape(n, -1, 1)  # Now (n, 14, 1)
+    return jnp.concatenate([thetas, x1, x2, x3, x4, x5], axis=1).reshape(n, -1, 1)
 
 def split_data(data, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15):
     n = data.shape[0]
@@ -71,19 +60,11 @@ def split_data(data, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15):
 
     return train_data, val_data, test_data
 
-theta_file = "data/input/conditioning_data.csv"
-x_file = "data/input/data_to_learn.csv"
-
-data = import_data(jrandom.PRNGKey(1), 850000, theta_file, x_file)
-data = data.astype(jnp.float32)  # Convert data to float32
+data = generate_data(jrandom.PRNGKey(1), 10000)  # Shape: (n, nodes, dim) here dim = 1
 nodes_max = data.shape[1]
 node_ids = jnp.arange(nodes_max)
 
 train_data, val_data, test_data = split_data(data)
-
-train_thetas, train_x = train_data[:, :9], train_data[:, 9:]
-val_thetas, val_x = val_data[:, :9], val_data[:, 9:]
-test_thetas, test_x = test_data[:, :9], test_data[:, 9:]
 
 fig, axes = plt.subplots(2, 7, figsize=(28, 8))
 labels = ['theta1', 'theta2', 'theta3', 'theta4', 'theta5', 'theta6', 'theta7', 'theta8', 'theta9', 'x1', 'x2', 'x3', 'x4', 'x5']
@@ -175,21 +156,13 @@ def model(t: Array, x: Array, node_ids: Array, condition_mask: Array, edge_mask:
     out = output_scale_fn(t, out)  # SDE dependent output scaling
     return out
 
-# Choose a small batch size for initialization
-init_batch_size = 8192
-
-# Create a small batch of data for initialization
-init_data = jax.tree_map(lambda x: x[:init_batch_size], data)
-init_node_ids = node_ids[:init_batch_size]
-
-# Initialize the model with the small batch
-init, model_fn = hk.without_apply_rng(hk.transform(model))
-params = init(key, jnp.ones(init_batch_size), init_data, init_node_ids, jnp.zeros_like(init_node_ids))
+# In Haiku, we need to initialize the model first, before we can use it.
+init, model_fn = hk.without_apply_rng(hk.transform(model)) # Init function initializes the parameters of the model, model_fn is the actual model function (which takes the parameters as first argument, hence is a "pure function")
+params = init(key, jnp.ones(data.shape[0]), data, node_ids, jnp.zeros_like(node_ids))
 
 # Here we can see the total number of parameters and their shapes
 print("Total number of parameters: ", jax.tree_util.tree_reduce(lambda x,y: x+y, jax.tree_map(lambda x: x.size, params)))
 jax.tree_util.tree_map(lambda x: x.shape, params) # Here we can see the shapes of the parameters
-
 
 
 ### LOSS ###
@@ -211,14 +184,9 @@ def marginalize(rng: PRNGKey, edge_mask: Array):
 def loss_fn(params: dict, key: PRNGKey, batch_size: int = 1024):
     rng_time, rng_sample, rng_data, rng_condition, rng_edge_mask1, rng_edge_mask2 = jax.random.split(key, 6)
 
-    # Sample from training data
-    idx = jax.random.choice(rng_sample, jnp.arange(train_thetas.shape[0]), (batch_size,))
-    batch_thetas = train_thetas[idx]
-    batch_x = train_x[idx]
-    batch_xs = jnp.concatenate([batch_thetas, batch_x], axis=1).reshape(batch_size, -1, 1)
-
-    # Generate random times
+    # Generate data and random times
     times = jax.random.uniform(rng_time, (batch_size, 1, 1), minval=T_min, maxval=1.0)
+    batch_xs = generate_data(rng_data, batch_size)  # n, T_max, 1
 
     # Node ids (can be subsampled but here we use all nodes)
     ids = node_ids
@@ -256,15 +224,13 @@ def loss_fn(params: dict, key: PRNGKey, batch_size: int = 1024):
 
     return loss
 
-def calculate_validation_loss(params, batch_size=1024):
+def calculate_validation_loss(params, val_data, batch_size=1024):
     num_batches = len(val_data) // batch_size
     total_loss = 0
     for i in range(num_batches):
-        start_idx = i * batch_size
-        end_idx = min((i + 1) * batch_size, len(val_data))
-        batch = val_data[start_idx:end_idx]
+        batch = val_data[i*batch_size:(i+1)*batch_size]
         key = jrandom.PRNGKey(i)  # Use a different key for each batch
-        loss = loss_fn(params, key, batch.shape[0])
+        loss = loss_fn(params, key, batch_size)
         total_loss += loss
     return total_loss / num_batches
 
@@ -304,7 +270,7 @@ for epoch in range(num_epochs):
 
     # Calculate validation loss
     params = jax.tree_map(lambda x: x[0], replicated_params)
-    val_loss = calculate_validation_loss(params)
+    val_loss = calculate_validation_loss(params, val_data)
 
     print(f"Epoch {epoch + 1}/{num_epochs}, Train Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}")
 
@@ -362,31 +328,8 @@ def sample_fn(key, shape, node_ids=node_ids, time_steps=500, condition_mask=jnp.
         jnp.linspace(1., T_min, time_steps))
     return ys
 
-def batch_sample(key, thetas, batch_size=2048):
-    num_samples = thetas.shape[0]
-    num_batches = (num_samples + batch_size - 1) // batch_size  # Ceiling division
-
-    samples_list = []
-
-    for i in range(num_batches):
-        start_idx = i * batch_size
-        end_idx = min((i + 1) * batch_size, num_samples)
-
-        batch_thetas = thetas[start_idx:end_idx]
-        batch_condition_value = jnp.pad(batch_thetas, ((0, 0), (0, 5)), mode='constant')
-
-        key, subkey = jax.random.split(key)
-        batch_samples = sample_fn(subkey, (batch_thetas.shape[0],), node_ids,
-                                  condition_mask=condition_mask,
-                                  condition_value=batch_condition_value)
-
-        samples_list.append(batch_samples[:, -1, :])  # Keep only the final timestep
-
-    return jnp.concatenate(samples_list, axis=0)
-
 # Assuming test_data is already split
 test_thetas = test_data[:, :9, 0]  # This will have shape (n_test, 9)
-# Use test_thetas directly
 print("Shape of test_thetas:", test_thetas.shape)
 
 # Set up conditioning mask and values for likelihood sampling
@@ -396,7 +339,12 @@ print("Shape of condition_value:", condition_value.shape)
 
 # Sample from the likelihood using the test thetas
 key_test = jrandom.PRNGKey(42)  # New key for test sampling
-final_samples = batch_sample(key_test, test_thetas)
+samples = sample_fn(key_test, (test_thetas.shape[0],), node_ids,
+                    condition_mask=condition_mask,
+                    condition_value=condition_value)
+
+# Extract the final samples
+final_samples = samples[:, -1, :]
 
 fig, axes = plt.subplots(2, 7, figsize=(28, 8))
 labels = ['theta1', 'theta2', 'theta3', 'theta4', 'theta5', 'theta6', 'theta7', 'theta8', 'theta9', 'x1', 'x2', 'x3', 'x4', 'x5']

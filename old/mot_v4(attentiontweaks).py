@@ -83,8 +83,8 @@ def import_data(key: PRNGKey, n: int, theta_file: str, x_file: str):
 
     return concatenated.reshape(n, -1, 1)  # Now (n, 14, 1)
 
-theta_file = "data/input/conditioning_data.csv"
-x_file = "data/input/data_to_learn.csv"
+theta_file = "../data/input/random/conditioning_data.csv"
+x_file = "../data/input/random/data_to_learn.csv"
 
 data = import_data(jrandom.PRNGKey(1), 849488, theta_file, x_file)
 data = data.astype(jnp.float32)  # Convert data to float32
@@ -174,7 +174,7 @@ def model(t: Array, x: Array, node_ids: Array, condition_mask: Array, edge_mask:
     x_encoded = jnp.concatenate([value_embeddings, id_embeddings, condition_embedding], axis=-1)
 
     # Transformer part --------------------------------------------------------------------------------
-    model = Transformer(num_heads=2, num_layers=2, attn_size=10, widening_factor=3)
+    model = Transformer(num_heads=4, num_layers=4, attn_size=32, widening_factor=4)
 
     # Encode - here we just use a transformer to transform the tokenized inputs into a latent representation
     h = model(x_encoded, context=time_embeddings, mask=edge_mask)
@@ -185,7 +185,7 @@ def model(t: Array, x: Array, node_ids: Array, condition_mask: Array, edge_mask:
     return out
 
 # Choose a small batch size for initialization
-init_batch_size = 128
+init_batch_size = 8192
 
 # Create a small batch of data for initialization
 init_data = jax.tree_map(lambda x: x[:init_batch_size], data)
@@ -216,7 +216,7 @@ def marginalize(rng: PRNGKey, edge_mask: Array):
     return edge_mask
 
 
-def loss_fn(params: dict, key: PRNGKey, batch_size: int = 1024):
+def loss_fn(params: dict, key: PRNGKey, batch_size: int = 2048):
     rng_time, rng_sample, rng_data, rng_condition, rng_edge_mask1, rng_edge_mask2 = jax.random.split(key, 6)
 
     # Generate data and random times
@@ -259,7 +259,7 @@ def loss_fn(params: dict, key: PRNGKey, batch_size: int = 1024):
 
     return loss
 
-def calculate_validation_loss(params, val_data, batch_size=1024):
+def calculate_validation_loss(params, val_data, batch_size=2048):
     num_batches = len(val_data) // batch_size
     total_loss = 0
     for i in range(num_batches):
@@ -291,7 +291,7 @@ replicated_params = jax.tree_map(lambda x: jnp.array([x] * n_devices), params)
 replicated_opt_state = jax.tree_map(lambda x: jnp.array([x] * n_devices), opt_state)
 
 key = jrandom.PRNGKey(0)
-num_epochs = 20
+num_epochs = 250
 steps_per_epoch = 5000
 
 for epoch in range(num_epochs):
@@ -364,7 +364,7 @@ def sample_fn(key, shape, node_ids=node_ids, time_steps=500, condition_mask=jnp.
     return ys
 
 
-def batch_sample(key, thetas, batch_size=1000):
+def batch_sample(key, thetas, batch_size=2048):
     num_samples = thetas.shape[0]
     num_batches = (num_samples + batch_size - 1) // batch_size  # Ceiling division
 

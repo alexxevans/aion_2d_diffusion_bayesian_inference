@@ -83,8 +83,8 @@ def import_data(key: PRNGKey, n: int, theta_file: str, x_file: str):
 
     return concatenated.reshape(n, -1, 1)  # Now (n, 14, 1)
 
-theta_file = "../data/input/conditioning_data.csv"
-x_file = "../data/input/data_to_learn.csv"
+theta_file = "../data/input/random/conditioning_data.csv"
+x_file = "../data/input/random/data_to_learn.csv"
 
 data = import_data(jrandom.PRNGKey(1), 849488, theta_file, x_file)
 data = data.astype(jnp.float32)  # Convert data to float32

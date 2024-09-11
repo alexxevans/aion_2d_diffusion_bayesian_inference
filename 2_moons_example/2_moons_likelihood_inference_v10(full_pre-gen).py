@@ -37,28 +37,19 @@ _ = os.system("nvidia-smi  --query-gpu=name --format=csv,noheader") # Should sho
 
 key = jax.random.PRNGKey(42)
 
-def import_data(key: PRNGKey, n: int, theta_file: str, x_file: str):
-    # Read the conditioning parameters (theta) from the CSV file
-    theta = pd.read_csv(theta_file).values  # Assuming shape (n, 9)
+thetas_full = jnp.array(pd.read_csv('../data/input/conditioning_data.csv').values)
 
-    # Read the target variables (x) from the CSV file
-    x = pd.read_csv(x_file).values  # Assuming shape (n, 5)
+def generate_data(key: PRNGKey, thetas: jnp.ndarray):
+    n = thetas.shape[0]
+    keys = jrandom.split(key, 6)  # We need 6 keys for noise
 
-    # Check the shapes before concatenation
-    print(f"Shape of theta: {theta.shape}")
-    print(f"Shape of x: {x.shape}")
+    x1 = 2 * jnp.sin(jnp.sum(thetas, axis=1, keepdims=True)) + jrandom.normal(keys[0], (n, 1)) * 0.5
+    x2 = 0.1 * jnp.sum(thetas**2, axis=1, keepdims=True) + 0.5 * jnp.abs(x1) * jrandom.normal(keys[1], (n, 1))
+    x3 = jnp.cos(thetas[:, 0:1]) + jrandom.normal(keys[2], (n, 1)) * 0.3
+    x4 = jnp.exp(thetas[:, 1:2] / 2) + jrandom.normal(keys[3], (n, 1)) * 0.2
+    x5 = thetas[:, 2:3] ** 2 + jrandom.normal(keys[4], (n, 1)) * 0.4
 
-    # Ensure the number of samples matches n
-    if theta.shape[0] != x.shape[0]:
-        raise ValueError("Mismatch in number of samples between theta and x")
-
-    # Concatenate theta and x to form the same format as in the original function
-    concatenated = jnp.concatenate([theta, x], axis=1)
-
-    # Check shape after concatenation
-    print(f"Shape after concatenation: {concatenated.shape}")
-
-    return concatenated.reshape(n, -1, 1)  # Now (n, 14, 1)
+    return jnp.concatenate([thetas, x1, x2, x3, x4, x5], axis=1).reshape(n, -1, 1)
 
 def split_data(data, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15):
     n = data.shape[0]
@@ -71,11 +62,7 @@ def split_data(data, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15):
 
     return train_data, val_data, test_data
 
-theta_file = "data/input/conditioning_data.csv"
-x_file = "data/input/data_to_learn.csv"
-
-data = import_data(jrandom.PRNGKey(1), 850000, theta_file, x_file)
-data = data.astype(jnp.float32)  # Convert data to float32
+data = generate_data(jrandom.PRNGKey(1), thetas_full)
 nodes_max = data.shape[1]
 node_ids = jnp.arange(nodes_max)
 

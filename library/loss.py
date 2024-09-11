@@ -53,13 +53,27 @@ def denoising_score_matching_loss(
     score_pred = model_fn(params, times, xs_t, *args, **kwargs)
     score_target = -eps / std_t
 
-    loss = (score_pred - score_target) ** 2
+    base_loss = (score_pred - score_target) ** 2
     if loss_mask is not None:
-        loss = jnp.where(loss_mask, 0.0, loss)
-    loss = weight_fn(times) * jnp.sum(loss, axis=axis, keepdims=True)
+        base_loss = jnp.where(loss_mask, 0.0,base_loss)
+    base_loss = weight_fn(times) * jnp.sum(base_loss, axis=axis, keepdims=True)
     if rebalance_loss:
         num_elements = jnp.sum(~loss_mask, axis=axis, keepdims=True)
-        loss = jnp.where(num_elements > 0, loss / num_elements, 0.0)
-    loss = jnp.mean(loss)
+        base_loss = jnp.where(num_elements > 0, base_loss / num_elements, 0.0)
+    base_loss = jnp.mean(base_loss)
+
+    ### 2ND ORDER ADJUSTMENTS ###
+    score_hess=0
+    #key, subkey = jax.random.split(key)
+    #hutchinson_eps = jax.random.normal(subkey, shape=xs_t.shape)  # {epsilon} generates noise
+
+    # model predicted
+    #score_pred_noisy = model_fn(params, times, xs_t + hutchinson_eps, *args, **kwargs)  # {s_phi(perturbed data)}
+    #score_hess = jnp.mean(jnp.sum(hutchinson_eps * (score_pred_noisy - score_pred), axis=-1))  # {hessian trace}
+
+    gamma = 1e-3
+
+    reg_term = gamma * score_hess
+    loss = base_loss + reg_term
 
     return loss
