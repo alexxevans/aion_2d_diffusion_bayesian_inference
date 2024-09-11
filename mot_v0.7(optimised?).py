@@ -113,7 +113,7 @@ plt.show()
 T = 1.
 T_min = 1e-2
 sigma_min = 1e-3
-sigma_max = 32.
+sigma_max = 15.
 
 p0 = Independent(Empirical(train_data), 1)
 sde = VESDE(p0, sigma_min=sigma_min , sigma_max=sigma_max)
@@ -173,7 +173,7 @@ def model(t: Array, x: Array, node_ids: Array, condition_mask: Array, edge_mask:
     x_encoded = jnp.concatenate([value_embeddings, id_embeddings, condition_embedding], axis=-1)
 
     # Transformer part --------------------------------------------------------------------------------
-    model = Transformer(num_heads=4, num_layers=4, attn_size=32, widening_factor=4)
+    model = Transformer(num_heads=4, num_layers=8, attn_size=16, widening_factor=4)
 
     # Encode - here we just use a transformer to transform the tokenized inputs into a latent representation
     h = model(x_encoded, context=time_embeddings, mask=edge_mask)
@@ -278,7 +278,7 @@ def calculate_validation_loss(params, batch_size=2048):
 ### TRAINING ###
 
 key = jrandom.PRNGKey(0)
-num_epochs = 10000  # Increased number of epochs
+num_epochs = 1  # Increased number of epochs
 steps_per_epoch = 5000
 
 warmup_steps = 1000

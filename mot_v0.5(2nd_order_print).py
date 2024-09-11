@@ -4,9 +4,6 @@ import jax.random as jrandom
 from jax.random import PRNGKey
 from jax import Array
 import os
-import csv
-from datetime import datetime
-
 
 import pickle
 from pathlib import Path
@@ -113,7 +110,7 @@ plt.show()
 T = 1.
 T_min = 1e-2
 sigma_min = 1e-3
-sigma_max = 32.
+sigma_max = 15.
 
 p0 = Independent(Empirical(train_data), 1)
 sde = VESDE(p0, sigma_min=sigma_min , sigma_max=sigma_max)
@@ -126,9 +123,9 @@ def output_scale_fn(t, x):
 
 ### BUILDING THE SIMFORMER ###
 
-dim_value = 64 # Size of the value embedding
-dim_id = 64  # Size of the node id embedding
-dim_condition = 32  # Size of the condition embedding
+dim_value = 20  # Size of the value embedding
+dim_id = 20  # Size of the node id embedding
+dim_condition = 10  # Size of the condition embedding
 
 def model(t: Array, x: Array, node_ids: Array, condition_mask: Array, edge_mask: Optional[Array] = None):
     """Simplified Simformer model.
@@ -173,7 +170,7 @@ def model(t: Array, x: Array, node_ids: Array, condition_mask: Array, edge_mask:
     x_encoded = jnp.concatenate([value_embeddings, id_embeddings, condition_embedding], axis=-1)
 
     # Transformer part --------------------------------------------------------------------------------
-    model = Transformer(num_heads=4, num_layers=4, attn_size=32, widening_factor=4)
+    model = Transformer(num_heads=2, num_layers=2, attn_size=10, widening_factor=3)
 
     # Encode - here we just use a transformer to transform the tokenized inputs into a latent representation
     h = model(x_encoded, context=time_embeddings, mask=edge_mask)
@@ -215,7 +212,7 @@ def marginalize(rng: PRNGKey, edge_mask: Array):
     return edge_mask
 
 
-def loss_fn(params: dict, key: PRNGKey, batch_size: int = 2048):
+def loss_fn(params: dict, key: PRNGKey, batch_size: int = 1024):
     rng_time, rng_sample, rng_data, rng_condition, rng_edge_mask1, rng_edge_mask2 = jax.random.split(key, 6)
 
     # Sample from training data
@@ -263,7 +260,7 @@ def loss_fn(params: dict, key: PRNGKey, batch_size: int = 2048):
 
     return loss
 
-def calculate_validation_loss(params, batch_size=2048):
+def calculate_validation_loss(params, batch_size=1024):
     num_batches = len(val_data) // batch_size
     total_loss = 0
     for i in range(num_batches):
@@ -275,10 +272,11 @@ def calculate_validation_loss(params, batch_size=2048):
         total_loss += loss
     return total_loss / num_batches
 
+
 ### TRAINING ###
 
 key = jrandom.PRNGKey(0)
-num_epochs = 10000  # Increased number of epochs
+num_epochs = 1  # Increase this, as early stopping will prevent unnecessary epochs
 steps_per_epoch = 5000
 
 warmup_steps = 1000
@@ -316,13 +314,6 @@ best_val_loss = float('inf')
 patience_counter = 0
 best_params = None
 
-# Prepare CSV file for logging
-timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-log_file = f"training_logs/log_{timestamp}.csv"
-with open(log_file, 'w', newline='') as file:
-    writer = csv.writer(file)
-    writer.writerow(["Epoch", "Train Loss", "Validation Loss"])
-
 step = 0
 for epoch in range(num_epochs):
     train_loss = 0
@@ -339,11 +330,6 @@ for epoch in range(num_epochs):
     val_loss = calculate_validation_loss(params)
 
     print(f"Epoch {epoch + 1}/{num_epochs}, Train Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}")
-
-    # Log losses to CSV
-    with open(log_file, 'a', newline='') as file:
-        writer = csv.writer(file)
-        writer.writerow([epoch + 1, train_loss, val_loss])
 
     # Early stopping logic
     if val_loss < best_val_loss:
@@ -365,12 +351,10 @@ save_dir = Path("models")
 save_dir.mkdir(exist_ok=True)
 
 # Save the best parameters
-model_file = save_dir / f"model_{timestamp}.pkl"
-with open(model_file, "wb") as f:
+with open(save_dir / "model1.pkl", "wb") as f:
     pickle.dump(params, f)
 
-print(f"Model parameters saved to {model_file}")
-print(f"Training log saved to {log_file}")
+print(f"Model parameters saved to {save_dir / 'model.pkl'}")
 
 ### SAMPLING ###
 

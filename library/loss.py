@@ -76,4 +76,9 @@ def denoising_score_matching_loss(
     reg_term = gamma * score_hess
     loss = base_loss + reg_term
 
+    #jax.debug.print(
+    #    "Loss: {}, Base Loss: {}, Regularisation Term: {}, Hessian Trace: {}",
+    #     loss, base_loss, reg_term, score_hess
+    #)
+
     return loss
