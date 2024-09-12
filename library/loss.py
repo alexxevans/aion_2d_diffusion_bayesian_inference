@@ -2,7 +2,7 @@
 import jax
 import jax.numpy as jnp
 from jax.random import PRNGKey
-
+import jax.lax as lax
 from functools import partial
 
 from typing import Optional, Sequence, Union, Callable
@@ -64,21 +64,35 @@ def denoising_score_matching_loss(
 
     ### 2ND ORDER ADJUSTMENTS ###
     score_hess=0
-    #key, subkey = jax.random.split(key)
-    #hutchinson_eps = jax.random.normal(subkey, shape=xs_t.shape)  # {epsilon} generates noise
+    key, subkey = jax.random.split(key)
+    hutchinson_eps = jax.random.normal(subkey, shape=xs_t.shape)  # {epsilon} generates noise
 
     # model predicted
-    #score_pred_noisy = model_fn(params, times, xs_t + hutchinson_eps, *args, **kwargs)  # {s_phi(perturbed data)}
-    #score_hess = jnp.mean(jnp.sum(hutchinson_eps * (score_pred_noisy - score_pred), axis=-1))  # {hessian trace}
+    score_pred_noisy = model_fn(params, times, xs_t + hutchinson_eps, *args, **kwargs)  # {s_phi(perturbed data)}
+    score_hess = jnp.mean(jnp.sum(hutchinson_eps * (score_pred_noisy - score_pred), axis=-1))  # {hessian trace}
 
-    gamma = 1e-3
+    gamma = 1e-4
 
     reg_term = gamma * score_hess
     loss = base_loss + reg_term
 
-    #jax.debug.print(
-    #    "Loss: {}, Base Loss: {}, Regularisation Term: {}, Hessian Trace: {}",
-    #     loss, base_loss, reg_term, score_hess
-    #)
+    # Use lax.cond for the conditional printing
+    def print_fn(operand):
+        jax.debug.print(
+            "Loss: {}, Base Loss: {}, Regularisation Term: {}, Hessian Trace: {}",
+            loss, base_loss, reg_term, score_hess
+        )
+        return operand
+
+    def no_print_fn(operand):
+        return operand
+
+    # The operand can be any value, we're not using it here
+    _ = lax.cond(
+        jax.random.randint(subkey, (), 0, 1000) == 0,
+        print_fn,
+        no_print_fn,
+        operand=0
+    )
 
     return loss
