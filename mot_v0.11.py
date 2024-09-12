@@ -4,102 +4,84 @@ import jax.random as jrandom
 from jax.random import PRNGKey
 from jax import Array
 import os
-
+import csv
+from datetime import datetime
+import ast
+import pickle
+from pathlib import Path
+from optax import linear_schedule, cosine_decay_schedule, join_schedules
 import matplotlib.pyplot as plt
-
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
-import seaborn as sns
 import pandas as pd
-
 from functools import partial
 from typing import Tuple, List, Optional
-
 import haiku as hk # Neural network library
 import optax # Gradient-based optimization in JAX
 
-# Some small helper functions
 from probjax.nn.transformers import Transformer
-
 from probjax.nn.helpers import GaussianFourierEmbedding
-
 from library.loss import denoising_score_matching_loss
 from probjax.distributions.sde import VESDE
 from probjax.distributions import Empirical, Independent
-
-from scoresbibm.utils.plot import use_style
-
-from sbi.analysis import pairplot
-import numpy as np
 
 jax.devices() # Should be cuda
 _ = os.system("nvidia-smi  --query-gpu=name --format=csv,noheader") # Should show GPU info
 
 key = jax.random.PRNGKey(42)
 
-def generate_data(key: PRNGKey, n: int):
-    keys = jrandom.split(key, 11)  # We need 11 keys now: 9 for thetas, 2 for noise
-    thetas = jrandom.normal(keys[0], (n, 9)) * 3  # Prior on 9 parameters
 
-    x1 = 2 * jnp.sin(jnp.sum(thetas, axis=1, keepdims=True)) + jrandom.normal(keys[9], (n, 1)) * 0.5
-    x2 = 0.1 * jnp.sum(thetas**2, axis=1, keepdims=True) + 0.5 * jnp.abs(x1) * jrandom.normal(keys[10], (n, 1))
-    x3 = jnp.cos(thetas[:, 0:1]) + jrandom.normal(keys[1], (n, 1)) * 0.3
-    x4 = jnp.exp(thetas[:, 1:2] / 2) + jrandom.normal(keys[2], (n, 1)) * 0.2
-    x5 = thetas[:, 2:3] ** 2 + jrandom.normal(keys[3], (n, 1)) * 0.4
+### DATA SETUP ###
 
-    return jnp.concatenate([thetas, x1, x2, x3, x4, x5], axis=1).reshape(n, -1, 1)
+def import_normalisation_params(file_path: str):
+    params = pd.read_csv(file_path)
+    norm_params = {}
+    for col in params.columns:
+        values = ast.literal_eval(params[col].values[0])
+        norm_params[col] = {'mean': values[0], 'std': values[1]}
+    return norm_params
 
-def split_data(data, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15):
-    n = data.shape[0]
-    train_size = int(n * train_ratio)
-    val_size = int(n * val_ratio)
+def import_and_combine_data(theta_file: str, x_file: str):
+    theta = pd.read_csv(theta_file).values
 
-    train_data = data[:train_size]
-    val_data = data[train_size:train_size + val_size]
-    test_data = data[train_size + val_size:]
-
-    return train_data, val_data, test_data
-
-def import_data(key: PRNGKey, n: int, theta_file: str, x_file: str):
-    # Read the conditioning parameters (theta) from the CSV file
-    theta = pd.read_csv(theta_file).values  # Assuming shape (n, 9)
-
-    # Read the target variables (x) from the CSV file
-    x = pd.read_csv(x_file).values  # Assuming shape (n, 5)
-
-    # Check the shapes before concatenation
+    x = pd.read_csv(x_file).values
     print(f"Shape of theta: {theta.shape}")
     print(f"Shape of x: {x.shape}")
 
-    # Ensure the number of samples matches n
     if theta.shape[0] != x.shape[0]:
         raise ValueError("Mismatch in number of samples between theta and x")
 
-    # Concatenate theta and x to form the same format as in the original function
     concatenated = jnp.concatenate([theta, x], axis=1)
 
-    # Check shape after concatenation
-    print(f"Shape after concatenation: {concatenated.shape}")
+    data = jnp.array(concatenated, dtype=jnp.float32)
+    print(f"Shape after concatenation: {data.shape}")
 
-    #return concatenated.reshape(n, -1, 1)  # Now (n, 14, 1)
+    return data.reshape(data.shape[0], -1, 1)
 
-theta_file = "../data/input/random/conditioning_data.csv"
-x_file = "../data/input/random/data_to_learn.csv"
+train_theta_file = "data/pseudo_random/train_conditioning_data.csv"
+train_x_file = "data/pseudo_random/train_data_to_learn.csv"
+val_theta_file = "data/pseudo_random/valid_conditioning_data.csv"
+val_x_file = "data/pseudo_random/valid_data_to_learn.csv"
+test_theta_file = "data/pseudo_random/test_conditioning_data.csv"
+test_x_file = "data/pseudo_random/test_data_to_learn.csv"
 
-#data = import_data(jrandom.PRNGKey(1), 849488, theta_file, x_file)
-#print(f"Imported data shape: {data.shape}")
-#data = data.astype(jnp.float32)  # Convert data to float32
-#nodes_max = data.shape[1]
-#node_ids = jnp.arange(nodes_max)
+print("Importing train data:")
+train_data = import_and_combine_data(train_theta_file, train_x_file)
+print("\nImporting validation data:")
+val_data = import_and_combine_data(val_theta_file, val_x_file)
+print("\nImporting test data:")
+test_data = import_and_combine_data(test_theta_file, test_x_file)
 
-#train_data, val_data, test_data = split_data(data)
+normalisation_file = "data/pseudo_random/normalisation_params.csv"
 
-data = generate_data(jrandom.PRNGKey(1), 1000000)  # Shape: (n, nodes, dim) here dim = 1
-print(f"Gen data shape: {data.shape}")
-nodes_max = data.shape[1]
+norm_params = import_normalisation_params(normalisation_file)
+print("Normalisation parameters:")
+print(norm_params)
+
+nodes_max = train_data.shape[1]
 node_ids = jnp.arange(nodes_max)
 
-train_data, val_data, test_data = split_data(data)
+print(f"\nTrain data shape: {train_data.shape}")
+print(f"Validation data shape: {val_data.shape}")
+print(f"Test data shape: {test_data.shape}")
 
 fig, axes = plt.subplots(2, 7, figsize=(28, 8))
 labels = ['theta1', 'theta2', 'theta3', 'theta4', 'theta5', 'theta6', 'theta7', 'theta8', 'theta9', 'x1', 'x2', 'x3', 'x4', 'x5']
@@ -122,7 +104,7 @@ plt.show()
 T = 1.
 T_min = 1e-2
 sigma_min = 1e-3
-sigma_max = 15.
+sigma_max = 32.
 
 p0 = Independent(Empirical(train_data), 1)
 sde = VESDE(p0, sigma_min=sigma_min , sigma_max=sigma_max)
@@ -135,9 +117,9 @@ def output_scale_fn(t, x):
 
 ### BUILDING THE SIMFORMER ###
 
-dim_value = 20  # Size of the value embedding
-dim_id = 20  # Size of the node id embedding
-dim_condition = 10  # Size of the condition embedding
+dim_value = 64 # Size of the value embedding
+dim_id = 64  # Size of the node id embedding
+dim_condition = 32  # Size of the condition embedding
 
 def model(t: Array, x: Array, node_ids: Array, condition_mask: Array, edge_mask: Optional[Array] = None):
     """Simplified Simformer model.
@@ -196,7 +178,7 @@ def model(t: Array, x: Array, node_ids: Array, condition_mask: Array, edge_mask:
 init_batch_size = 8192
 
 # Create a small batch of data for initialization
-init_data = jax.tree_map(lambda x: x[:init_batch_size], data)
+init_data = jax.tree_map(lambda x: x[:init_batch_size], train_data)
 init_node_ids = node_ids[:init_batch_size]
 
 # Initialize the model with the small batch
@@ -227,9 +209,12 @@ def marginalize(rng: PRNGKey, edge_mask: Array):
 def loss_fn(params: dict, key: PRNGKey, batch_size: int = 2048):
     rng_time, rng_sample, rng_data, rng_condition, rng_edge_mask1, rng_edge_mask2 = jax.random.split(key, 6)
 
-    # Generate data and random times
+    # Sample from training data
+    idx = jax.random.choice(rng_sample, jnp.arange(train_data.shape[0]), (batch_size,))
+    batch_xs = train_data[idx]
+
+    # Generate random times
     times = jax.random.uniform(rng_time, (batch_size, 1, 1), minval=T_min, maxval=1.0)
-    batch_xs = generate_data(rng_data, batch_size)  # n, T_max, 1
 
     # Node ids (can be subsampled but here we use all nodes)
     ids = node_ids
@@ -267,20 +252,37 @@ def loss_fn(params: dict, key: PRNGKey, batch_size: int = 2048):
 
     return loss
 
-def calculate_validation_loss(params, val_data, batch_size=2048):
+def calculate_validation_loss(params, batch_size=2048):
     num_batches = len(val_data) // batch_size
     total_loss = 0
     for i in range(num_batches):
-        batch = val_data[i*batch_size:(i+1)*batch_size]
+        start_idx = i * batch_size
+        end_idx = min((i + 1) * batch_size, len(val_data))
+        batch = val_data[start_idx:end_idx]
         key = jrandom.PRNGKey(i)  # Use a different key for each batch
-        loss = loss_fn(params, key, batch_size)
+        loss = loss_fn(params, key, batch.shape[0])
         total_loss += loss
     return total_loss / num_batches
 
 
 ### TRAINING ###
 
-optimizer = optax.adam(1e-3)
+key = jrandom.PRNGKey(0)
+num_epochs = 10000  # Increased number of epochs
+steps_per_epoch = 5000
+
+warmup_steps = 1000
+total_steps = num_epochs * steps_per_epoch
+peak_lr = 1e-3
+
+warmup_schedule = linear_schedule(init_value=0.0, end_value=peak_lr, transition_steps=warmup_steps)
+decay_schedule = cosine_decay_schedule(init_value=peak_lr, decay_steps=total_steps - warmup_steps)
+lr_schedule = join_schedules([warmup_schedule, decay_schedule], boundaries=[warmup_steps])
+
+optimizer = optax.chain(
+    optax.clip_by_global_norm(1.0),
+    optax.adam(learning_rate=lr_schedule)
+)
 opt_state = optimizer.init(params)
 
 @partial(jax.pmap, axis_name="num_devices")
@@ -298,10 +300,20 @@ n_devices = jax.local_device_count()
 replicated_params = jax.tree_map(lambda x: jnp.array([x] * n_devices), params)
 replicated_opt_state = jax.tree_map(lambda x: jnp.array([x] * n_devices), opt_state)
 
-key = jrandom.PRNGKey(0)
-num_epochs = 2
-steps_per_epoch = 5000
+# Early stopping parameters
+patience = 5
+best_val_loss = float('inf')
+patience_counter = 0
+best_params = None
 
+# Prepare CSV file for logging
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+log_file = f"training_logs/log_{timestamp}.csv"
+with open(log_file, 'w', newline='') as file:
+    writer = csv.writer(file)
+    writer.writerow(["Epoch", "Train Loss", "Validation Loss"])
+
+step = 0
 for epoch in range(num_epochs):
     train_loss = 0
     for i in range(steps_per_epoch):
@@ -310,14 +322,45 @@ for epoch in range(num_epochs):
                                                                jax.random.split(subkey, (n_devices,)),
                                                                replicated_opt_state)
         train_loss += loss[0] / steps_per_epoch
+        step += 1
 
     # Calculate validation loss
     params = jax.tree_map(lambda x: x[0], replicated_params)
-    val_loss = calculate_validation_loss(params, val_data)
+    val_loss = calculate_validation_loss(params)
 
     print(f"Epoch {epoch + 1}/{num_epochs}, Train Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}")
 
-params = jax.tree_map(lambda x: x[0], replicated_params)
+    # Log losses to CSV
+    with open(log_file, 'a', newline='') as file:
+        writer = csv.writer(file)
+        writer.writerow([epoch + 1, train_loss, val_loss])
+
+    # Early stopping logic
+    if val_loss < best_val_loss:
+        best_val_loss = val_loss
+        patience_counter = 0
+        best_params = params  # Save the best parameters
+    else:
+        patience_counter += 1
+
+    if patience_counter >= patience:
+        print(f"Early stopping triggered after {epoch + 1} epochs")
+        break
+
+# Use the best parameters found during training
+params = best_params if best_params is not None else params
+
+# After the training loop
+save_dir = Path("models")
+save_dir.mkdir(exist_ok=True)
+
+# Save the best parameters
+model_file = save_dir / f"model_{timestamp}.pkl"
+with open(model_file, "wb") as f:
+    pickle.dump(params, f)
+
+print(f"Model parameters saved to {model_file}")
+print(f"Training log saved to {log_file}")
 
 
 ### SAMPLING ###
@@ -371,7 +414,6 @@ def sample_fn(key, shape, node_ids=node_ids, time_steps=500, condition_mask=jnp.
         jnp.linspace(1., T_min, time_steps))
     return ys
 
-
 def batch_sample(key, thetas, batch_size=2048):
     num_samples = thetas.shape[0]
     num_batches = (num_samples + batch_size - 1) // batch_size  # Ceiling division
@@ -394,20 +436,33 @@ def batch_sample(key, thetas, batch_size=2048):
 
     return jnp.concatenate(samples_list, axis=0)
 
-# Assuming test_data is already split
+
 test_thetas = test_data[:, :9, 0]  # This will have shape (n_test, 9)
 print("Shape of test_thetas:", test_thetas.shape)
 
-# Set up conditioning mask and values for likelihood sampling
 condition_mask = jnp.array([1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0])  # Condition on 9 thetas, sample 5 xs
 condition_value = jnp.pad(test_thetas, ((0, 0), (0, 5)), mode='constant')  # Pad 9 thetas with zeros for 5 xs
 print("Shape of condition_value:", condition_value.shape)
 
-# Sample from the likelihood using the test thetas
 key_test = jrandom.PRNGKey(42)  # New key for test sampling
 final_samples = batch_sample(key_test, test_thetas)
-
 print("Shape of final_samples:", final_samples.shape)
+
+test_x = test_data[:, 9:, 0]  # Assuming the last 5 columns are x values
+
+results_df = pd.DataFrame()
+
+for i in range(9):
+    results_df[f'theta{i+1}'] = test_thetas[:, i]
+for i in range(5):
+    results_df[f'x{i+1}_true'] = test_x[:, i]
+predicted_x = final_samples[:, 9:]  # Only the x values
+for i in range(5):
+    results_df[f'x{i+1}_pred'] = predicted_x[:, i]
+
+# Save to CSV
+results_df.to_csv('results/test_results.csv', index=False)
+print("Test results saved to test_results.csv")
 
 fig, axes = plt.subplots(2, 7, figsize=(28, 8))
 labels = ['theta1', 'theta2', 'theta3', 'theta4', 'theta5', 'theta6', 'theta7', 'theta8', 'theta9', 'x1', 'x2', 'x3', 'x4', 'x5']
